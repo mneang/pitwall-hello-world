@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@forge/bridge';
-import ForgeReconciler, { Text, Strong, Stack, Lozenge, Button } from '@forge/react';
+import ForgeReconciler, { Text, Strong, Stack, Lozenge, Button, Inline, Box } from '@forge/react';
 
 function cleanSummary(summary) {
   if (!summary) return '';
@@ -14,10 +14,11 @@ function formatStale(staleHours) {
   return `${days.toFixed(1)}d`;
 }
 
-function formatSla(hours) {
-  if (hours === null || hours === undefined) return null;
-  return `${Math.round(hours * 10) / 10}h`;
-}
+const riskLozenge = (risk) => {
+  if (risk === 'HIGH') return <Lozenge appearance="removed">HIGH RISK</Lozenge>;
+  if (risk === 'MEDIUM') return <Lozenge appearance="inprogress">MEDIUM RISK</Lozenge>;
+  return <Lozenge appearance="success">NORMAL</Lozenge>;
+};
 
 const App = () => {
   const [state, setState] = useState({
@@ -26,6 +27,7 @@ const App = () => {
     issues: [],
     error: null,
     toast: null,
+    drafts: {}, // issueKey -> draft text
   });
 
   const loadIssues = async () => {
@@ -53,44 +55,60 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const requestUpdate = async (issueKey) => {
-    setState((s) => ({ ...s, toast: `Sending request for ${issueKey}...` }));
+  const setToast = (msg) => setState((s) => ({ ...s, toast: msg }));
+
+  const runAction = async (label, issueKey, actionName, payload = {}) => {
+    setToast(`⏳ ${label} for ${issueKey}...`);
     try {
-      const res = await invoke('requestUpdate', { issueKey });
+      const res = await invoke(actionName, { issueKey, ...payload });
       if (res?.ok) {
-        setState((s) => ({ ...s, toast: `✅ Comment added to ${issueKey}` }));
+        setToast(`✅ ${label} complete for ${issueKey}`);
         await loadIssues();
       } else {
-        setState((s) => ({ ...s, toast: `❌ Failed: ${res?.error || 'unknown error'}` }));
+        setToast(`❌ ${label} for ${issueKey} failed: ${res?.error || 'unknown error'}`);
       }
+      return res;
     } catch (e) {
-      setState((s) => ({ ...s, toast: `❌ Failed: ${String(e)}` }));
+      setToast(`❌ ${label} for ${issueKey} failed: ${String(e)}`);
+      return { ok: false, error: String(e) };
     }
   };
 
-  const assignToMe = async (issueKey) => {
-    setState((s) => ({ ...s, toast: `Assigning ${issueKey} to you...` }));
+  const onAssignToMe = (issueKey) => runAction('Assign to me', issueKey, 'assignToMe');
+  const onRequestUpdate = (issueKey) => runAction('Request update', issueKey, 'requestUpdate');
+  const onPlaybookNote = (issueKey) => runAction('Post playbook note', issueKey, 'postPlaybookNote');
+
+  const onGenerateCustomerUpdate = async (issueKey) => {
+    setToast(`⏳ Generating customer update for ${issueKey}...`);
     try {
-      const res = await invoke('assignToMe', { issueKey });
+      const res = await invoke('generateCustomerUpdate', { issueKey });
       if (res?.ok) {
-        setState((s) => ({ ...s, toast: `✅ Assigned ${issueKey} to you` }));
-        await loadIssues();
+        setState((s) => ({
+          ...s,
+          drafts: { ...s.drafts, [issueKey]: res.draft || '' },
+          toast: `✅ Customer update draft ready for ${issueKey}`,
+        }));
       } else {
-        setState((s) => ({ ...s, toast: `❌ Failed: ${res?.error || 'unknown error'}` }));
+        setToast(`❌ Generate customer update for ${issueKey} failed: ${res?.error || 'unknown error'}`);
       }
     } catch (e) {
-      setState((s) => ({ ...s, toast: `❌ Failed: ${String(e)}` }));
+      setToast(`❌ Generate customer update for ${issueKey} failed: ${String(e)}`);
+    }
+  };
+
+  const onEscalate = (issueKey) => runAction('Escalate', issueKey, 'escalate');
+
+  const copyDraft = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast('✅ Draft copied to clipboard');
+    } catch {
+      setToast('⚠️ Could not auto-copy (browser blocked). You can manually copy the text.');
     }
   };
 
   if (state.loading) return <Text>Loading Pit Wall…</Text>;
   if (state.error) return <Text>Error: {state.error}</Text>;
-
-  const riskLozenge = (risk) => {
-    if (risk === 'HIGH') return <Lozenge appearance="removed">HIGH RISK</Lozenge>;
-    if (risk === 'MEDIUM') return <Lozenge appearance="inprogress">MEDIUM RISK</Lozenge>;
-    return <Lozenge appearance="success">NORMAL</Lozenge>;
-  };
 
   return (
     <Stack space="space.200">
@@ -104,37 +122,52 @@ const App = () => {
       {!state.issues.length ? (
         <Text>No open issues found. Create a few issues in this project to demo.</Text>
       ) : (
-        state.issues.map((i) => (
-          <Stack key={i.key} space="space.100">
-            <Text>
-              <Strong>{i.key}</Strong> — {cleanSummary(i.summary)}
-            </Text>
+        state.issues.map((i) => {
+          const reasonsText = i.reasons?.length ? i.reasons.join(' • ') : '—';
+          const slaText =
+            i.firstResponseRemainingHours !== null && i.firstResponseRemainingHours !== undefined
+              ? ` | SLA (1st response): ${Math.round(i.firstResponseRemainingHours * 10) / 10}h`
+              : '';
 
-            <Text>
-              {riskLozenge(i.risk)}{' '}
-              <Lozenge>{i.status}</Lozenge>{' '}
-              Updated: {i.updated ? new Date(i.updated).toLocaleString() : 'Unknown'} |{' '}
-              Stale: {formatStale(i.staleHours)} |{' '}
-              Owner: {i.assigneeName || 'Unassigned'}
-              {i.firstResponseRemainingHours !== null && i.firstResponseRemainingHours !== undefined
-                ? ` | SLA (1st response): ${formatSla(i.firstResponseRemainingHours)}`
-                : ''}
-            </Text>
+          const draft = state.drafts[i.key];
 
-            {Array.isArray(i.reasons) && i.reasons.length > 0 && (
+          return (
+            <Stack key={i.key} space="space.100">
               <Text>
-                <Strong>Reason:</Strong> {i.reasons.join(' • ')}
+                <Strong>{i.key}</Strong> — {cleanSummary(i.summary)}
               </Text>
-            )}
 
-            <Stack space="space.100">
-              {!i.assigneeName && (
-                <Button onClick={() => assignToMe(i.key)}>Assign to me</Button>
-              )}
-              <Button onClick={() => requestUpdate(i.key)}>Request update</Button>
+              <Text>
+                {riskLozenge(i.risk)}{' '}
+                <Lozenge>{i.status}</Lozenge>{' '}
+                Updated: {i.updated ? new Date(i.updated).toLocaleString() : 'Unknown'} | Stale: {formatStale(i.staleHours)} | Owner: {i.assigneeName || 'Unassigned'}
+                {slaText}
+              </Text>
+
+              <Text>
+                <Strong>Reason:</Strong> {reasonsText}
+              </Text>
+
+              <Inline space="space.100">
+                <Button onClick={() => onAssignToMe(i.key)}>Assign to me</Button>
+                <Button onClick={() => onRequestUpdate(i.key)}>Request update</Button>
+                <Button onClick={() => onPlaybookNote(i.key)}>Post playbook note</Button>
+                <Button onClick={() => onGenerateCustomerUpdate(i.key)}>Generate customer update</Button>
+                <Button appearance="danger" onClick={() => onEscalate(i.key)}>Escalate</Button>
+              </Inline>
+
+              {draft ? (
+                <Box padding="space.100">
+                  <Text><Strong>Customer update draft</Strong></Text>
+                  <Text>{draft}</Text>
+                  <Inline space="space.100">
+                    <Button onClick={() => copyDraft(draft)}>Copy draft</Button>
+                  </Inline>
+                </Box>
+              ) : null}
             </Stack>
-          </Stack>
-        ))
+          );
+        })
       )}
     </Stack>
   );
