@@ -14,6 +14,11 @@ function formatStale(staleHours) {
   return `${days.toFixed(1)}d`;
 }
 
+function formatSla(hours) {
+  if (hours === null || hours === undefined) return null;
+  return `${Math.round(hours * 10) / 10}h`;
+}
+
 const App = () => {
   const [state, setState] = useState({
     loading: true,
@@ -63,7 +68,6 @@ const App = () => {
     }
   };
 
-  // ✅ NEW: Assign to me
   const assignToMe = async (issueKey) => {
     setState((s) => ({ ...s, toast: `Assigning ${issueKey} to you...` }));
     try {
@@ -72,10 +76,10 @@ const App = () => {
         setState((s) => ({ ...s, toast: `✅ Assigned ${issueKey} to you` }));
         await loadIssues();
       } else {
-        setState((s) => ({ ...s, toast: `❌ Assign failed: ${res?.error || 'unknown error'}` }));
+        setState((s) => ({ ...s, toast: `❌ Failed: ${res?.error || 'unknown error'}` }));
       }
     } catch (e) {
-      setState((s) => ({ ...s, toast: `❌ Assign failed: ${String(e)}` }));
+      setState((s) => ({ ...s, toast: `❌ Failed: ${String(e)}` }));
     }
   };
 
@@ -109,25 +113,24 @@ const App = () => {
             <Text>
               {riskLozenge(i.risk)}{' '}
               <Lozenge>{i.status}</Lozenge>{' '}
-              Updated: {new Date(i.updated).toLocaleString()} | Stale: {formatStale(i.staleHours)} | Owner: {i.assigneeName || 'Unassigned'}
-              {i.firstResponseRemainingHours !== null
-                ? ` | SLA (1st response): ${Math.round(i.firstResponseRemainingHours * 10) / 10}h`
+              Updated: {i.updated ? new Date(i.updated).toLocaleString() : 'Unknown'} |{' '}
+              Stale: {formatStale(i.staleHours)} |{' '}
+              Owner: {i.assigneeName || 'Unassigned'}
+              {i.firstResponseRemainingHours !== null && i.firstResponseRemainingHours !== undefined
+                ? ` | SLA (1st response): ${formatSla(i.firstResponseRemainingHours)}`
                 : ''}
             </Text>
 
-            {i.reasons?.length ? (
+            {Array.isArray(i.reasons) && i.reasons.length > 0 && (
               <Text>
                 <Strong>Reason:</Strong> {i.reasons.join(' • ')}
               </Text>
-            ) : null}
+            )}
 
-            {/* Actions */}
             <Stack space="space.100">
-              {/* Only show Assign button if unassigned */}
-              {!i.assigneeName ? (
+              {!i.assigneeName && (
                 <Button onClick={() => assignToMe(i.key)}>Assign to me</Button>
-              ) : null}
-
+              )}
               <Button onClick={() => requestUpdate(i.key)}>Request update</Button>
             </Stack>
           </Stack>
