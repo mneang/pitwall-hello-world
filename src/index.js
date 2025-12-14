@@ -50,12 +50,22 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
       const staleHours = updated ? hoursSince(updated) : null;
 
       let risk = 'NORMAL';
-      if (isBlocked) {
-        if (staleHours !== null && staleHours >= STALE_HIGH_HOURS) risk = 'HIGH';
-        else if (staleHours !== null && staleHours >= STALE_MEDIUM_HOURS) risk = 'MEDIUM';
-        else risk = 'MEDIUM'; // blocked even if fresh = still needs attention
-      }
 
+      // Demo override: if summary contains [DEMO-HIGH], force HIGH risk
+      const summary = i.fields?.summary || '';
+      const isDemoHigh = summary.includes('[DEMO-HIGH]');
+
+      if (isBlocked) {
+        if (isDemoHigh) {
+          risk = 'HIGH';
+        } else if (staleHours !== null && staleHours >= STALE_HIGH_HOURS) {
+          risk = 'HIGH';
+        } else if (staleHours !== null && staleHours >= STALE_MEDIUM_HOURS) {
+          risk = 'MEDIUM';
+        } else {
+          risk = 'MEDIUM'; // blocked even if fresh = still needs attention
+        }
+}
       return {
         key: i.key,
         summary: i.fields?.summary,
