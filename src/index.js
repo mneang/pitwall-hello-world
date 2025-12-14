@@ -31,7 +31,7 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
   const jql = `project = ${projectKey} AND statusCategory != Done ORDER BY updated ASC`;
 
   const res = await api.asUser().requestJira(
-    route`/rest/api/3/search/jql?jql=${jql}&maxResults=10&fields=summary,status,updated`
+    route`/rest/api/3/search/jql?jql=${jql}&maxResults=10&fields=summary,status,updated,assignee`
   );
 
   if (!res.ok) {
@@ -48,6 +48,7 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
 
       const isBlocked = status === BLOCKED_STATUS_NAME;
       const staleHours = updated ? hoursSince(updated) : null;
+      const isUnassigned = !i.fields?.assignee;
 
       let risk = 'NORMAL';
 
@@ -65,15 +66,23 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
         } else {
           risk = 'MEDIUM'; // blocked even if fresh = still needs attention
         }
-}
-      return {
-        key: i.key,
-        summary: i.fields?.summary,
-        status,
-        updated,
-        staleHours,
-        risk,
-      };
+      
+        // Option B: if blocked and unassigned, escalate one level (MEDIUM -> HIGH)
+        if (isUnassigned && risk === 'MEDIUM') {
+          risk = 'HIGH';
+        }
+      }
+    const assigneeName = i.fields?.assignee?.displayName || null;
+
+    return {
+      key: i.key,
+      summary: i.fields?.summary,
+      status,
+      updated,
+      staleHours,
+      assigneeName,
+      risk,
+    };
     })
     .sort((a, b) => {
       const rank = (r) => (r === 'HIGH' ? 0 : r === 'MEDIUM' ? 1 : 2);
