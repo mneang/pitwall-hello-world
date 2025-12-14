@@ -9,8 +9,8 @@ const STALE_MEDIUM_HOURS = 24;
 const STALE_HIGH_HOURS = 72;
 
 // SLA thresholds (Option B)
-const SLA_HIGH_HOURS = 2;   // < 2h remaining => HIGH
-const SLA_MEDIUM_HOURS = 8; // < 8h remaining => MEDIUM
+const SLA_HIGH_HOURS = 2;   // <= 2h remaining => HIGH
+const SLA_MEDIUM_HOURS = 8; // <= 8h remaining => at least MEDIUM
 
 function hoursSince(iso) {
   const ms = Date.now() - new Date(iso).getTime();
@@ -18,18 +18,16 @@ function hoursSince(iso) {
 }
 
 // Parse Jira Service Management SLA remaining time (best-effort)
-// We support the common patterns Jira shows like: "2h 30m", "45m", "1d 3h", "Breached"
+// Supports patterns like: "2h 30m", "45m", "1d 3h", "Breached"
 function parseSlaRemainingToHours(text) {
   if (!text) return null;
 
   const t = String(text).toLowerCase().trim();
 
-  // Common breached flags
   if (t.includes('breach') || t.includes('breached') || t.includes('overdue')) {
-    return 0; // treat as 0 hours remaining
+    return 0;
   }
 
-  // Examples: "1d 2h", "2h 30m", "45m"
   const dayMatch = t.match(/(\d+)\s*d/);
   const hourMatch = t.match(/(\d+)\s*h/);
   const minMatch = t.match(/(\d+)\s*m/);
@@ -38,41 +36,31 @@ function parseSlaRemainingToHours(text) {
   const hours = hourMatch ? parseInt(hourMatch[1], 10) : 0;
   const mins = minMatch ? parseInt(minMatch[1], 10) : 0;
 
-  // If nothing matched, we can't parse
   if (!dayMatch && !hourMatch && !minMatch) return null;
 
   return days * 24 + hours + mins / 60;
 }
 
 // Try to extract “time to first response” remaining from fields.sla (JSM)
-// Because SLA field structure can vary, we do a best-effort extraction:
-// - If we can find a SLA entry whose name includes "first response", we use it.
-// - Else we return null and we simply don't apply SLA escalation.
 function extractFirstResponseSlaRemainingHours(fields) {
   const sla = fields?.sla;
   if (!sla) return null;
 
-  // Some instances expose SLA as an array under sla.completedCycles / ongoingCycle, etc.
-  // Others expose as an object map. We'll handle both in a defensive way.
   const candidates = [];
 
   if (Array.isArray(sla)) {
     candidates.push(...sla);
   } else if (typeof sla === 'object') {
-    // If it's a map of SLA objects
     for (const key of Object.keys(sla)) {
       candidates.push(sla[key]);
     }
   }
 
-  // Flatten potential entries
   for (const entry of candidates) {
     const name = entry?.name || entry?.goalName || entry?.metricName || '';
     const n = String(name).toLowerCase();
-
     if (!n.includes('first response')) continue;
 
-    // Common places remaining text may appear
     const remainingText =
       entry?.ongoingCycle?.remainingTime?.friendly ||
       entry?.ongoingCycle?.remainingTime?.display ||
@@ -87,7 +75,6 @@ function extractFirstResponseSlaRemainingHours(fields) {
     const hours = parseSlaRemainingToHours(remainingText);
     if (hours !== null) return hours;
 
-    // If breached flag exists
     if (entry?.ongoingCycle?.breached === true || entry?.breached === true) return 0;
   }
 
@@ -101,10 +88,6 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
     return { issues: [], error: 'No project key found in context.' };
   }
 
-  // Request fields needed:
-  // - summary, status, updated (existing)
-  // - assignee (Option B, owner visibility)
-  // - sla (Option B, SLA-aware escalation; may be available in JSM contexts)
   const jql = `project = ${projectKey} AND statusCategory != Done ORDER BY updated ASC`;
 
   const res = await api.asUser().requestJira(
@@ -130,14 +113,13 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
       const isUnassigned = !i.fields?.assignee;
       const assigneeName = i.fields?.assignee?.displayName || null;
 
-      // SLA remaining hours (best-effort)
+      // SLA remaining hours (best-effort) — define it BEFORE we use it
       const firstResponseRemainingHours = extractFirstResponseSlaRemainingHours(i.fields);
 
       // Base risk
       let risk = 'NORMAL';
 
       if (isBlocked) {
-        // Demo override is always strongest
         if (isDemoHigh) {
           risk = 'HIGH';
         } else if (staleHours !== null && staleHours >= STALE_HIGH_HOURS) {
@@ -148,14 +130,12 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
           risk = 'MEDIUM';
         }
 
-        // Owner escalation (Option B part 1)
+        // Unassigned escalation
         if (isUnassigned && risk === 'MEDIUM') {
           risk = 'HIGH';
         }
 
-        // SLA escalation (Option B part 2)
-        // If SLA is breached (0h) or very close (<2h), force HIGH
-        // If close (<8h), ensure at least MEDIUM
+        // SLA escalation
         if (firstResponseRemainingHours !== null) {
           if (firstResponseRemainingHours <= SLA_HIGH_HOURS) {
             risk = 'HIGH';
@@ -163,6 +143,29 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
             risk = 'MEDIUM';
           }
         }
+      }
+
+      // Risk reasons (explainability) — build AFTER risk inputs are known
+      const reasons = [];
+
+      if (status === BLOCKED_STATUS_NAME) reasons.push('Waiting for support');
+      if (isUnassigned) reasons.push('Unassigned');
+      if (isDemoHigh) reasons.push('Demo override');
+
+      if (staleHours !== null) {
+        if (staleHours >= STALE_HIGH_HOURS) reasons.push(`Stale ${STALE_HIGH_HOURS}h+`);
+        else if (staleHours >= STALE_MEDIUM_HOURS) reasons.push(`Stale ${STALE_MEDIUM_HOURS}h+`);
+      }
+
+      if (firstResponseRemainingHours !== null) {
+        if (firstResponseRemainingHours <= SLA_HIGH_HOURS) reasons.push(`SLA ≤ ${SLA_HIGH_HOURS}h`);
+        else if (firstResponseRemainingHours <= SLA_MEDIUM_HOURS) reasons.push(`SLA ≤ ${SLA_MEDIUM_HOURS}h`);
+      }
+
+      // If NORMAL and no reasons, keep UI clean
+      if (risk === 'NORMAL') {
+        // You can choose to keep reasons empty for NORMAL items
+        // (Judges like signal > noise)
       }
 
       return {
@@ -174,6 +177,7 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
         assigneeName,
         firstResponseRemainingHours,
         risk,
+        reasons,
       };
     })
     .sort((a, b) => {
@@ -182,7 +186,6 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
       const rb = rank[b.risk] ?? 9;
       if (ra !== rb) return ra - rb;
 
-      // Tie-breaker: older updated first (more urgent)
       const ta = a.updated ? new Date(a.updated).getTime() : Number.MAX_SAFE_INTEGER;
       const tb = b.updated ? new Date(b.updated).getTime() : Number.MAX_SAFE_INTEGER;
       return ta - tb;

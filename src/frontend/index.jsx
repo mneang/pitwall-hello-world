@@ -54,7 +54,7 @@ const App = () => {
       const res = await invoke('requestUpdate', { issueKey });
       if (res?.ok) {
         setState((s) => ({ ...s, toast: `✅ Comment added to ${issueKey}` }));
-        await loadIssues(); // refresh ordering/timestamps
+        await loadIssues();
       } else {
         setState((s) => ({ ...s, toast: `❌ Failed: ${res?.error || 'unknown error'}` }));
       }
@@ -69,7 +69,7 @@ const App = () => {
   const riskLozenge = (risk) => {
     if (risk === 'HIGH') return <Lozenge appearance="removed">HIGH RISK</Lozenge>;
     if (risk === 'MEDIUM') return <Lozenge appearance="inprogress">MEDIUM RISK</Lozenge>;
-    return <Lozenge appearance="success">Normal</Lozenge>;
+    return <Lozenge appearance="success">NORMAL</Lozenge>;
   };
 
   return (
@@ -87,14 +87,24 @@ const App = () => {
         state.issues.map((i) => (
           <Stack key={i.key} space="space.100">
             <Text>
-            <Strong>{i.key}</Strong> — {cleanSummary(i.summary)}
+              <Strong>{i.key}</Strong> — {cleanSummary(i.summary)}
             </Text>
 
             <Text>
               {riskLozenge(i.risk)}{' '}
               <Lozenge>{i.status}</Lozenge>{' '}
-              Updated: {new Date(i.updated).toLocaleString()} | Stale: {formatStale(i.staleHours)} | Owner: {i.assigneeName || 'Unassigned'} {i.firstResponseRemainingHours !== null ? `| SLA (1st response): ${Math.round(i.firstResponseRemainingHours * 10) / 10}h` : ''}
+              Updated: {new Date(i.updated).toLocaleString()} | Stale: {formatStale(i.staleHours)} | Owner: {i.assigneeName || 'Unassigned'}
+              {i.firstResponseRemainingHours !== null
+                ? ` | SLA (1st response): ${Math.round(i.firstResponseRemainingHours * 10) / 10}h`
+                : ''}
             </Text>
+
+            {/* NEW: Reasons line */}
+            {i.reasons?.length ? (
+              <Text>
+                <Strong>Reason:</Strong> {i.reasons.join(' • ')}
+              </Text>
+            ) : null}
 
             <Button onClick={() => requestUpdate(i.key)}>Request update</Button>
           </Stack>
