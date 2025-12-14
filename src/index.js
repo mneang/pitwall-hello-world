@@ -18,15 +18,11 @@ function hoursSince(iso) {
 }
 
 // Parse Jira Service Management SLA remaining time (best-effort)
-// Supports patterns like: "2h 30m", "45m", "1d 3h", "Breached"
 function parseSlaRemainingToHours(text) {
   if (!text) return null;
 
   const t = String(text).toLowerCase().trim();
-
-  if (t.includes('breach') || t.includes('breached') || t.includes('overdue')) {
-    return 0;
-  }
+  if (t.includes('breach') || t.includes('breached') || t.includes('overdue')) return 0;
 
   const dayMatch = t.match(/(\d+)\s*d/);
   const hourMatch = t.match(/(\d+)\s*h/);
@@ -41,19 +37,15 @@ function parseSlaRemainingToHours(text) {
   return days * 24 + hours + mins / 60;
 }
 
-// Try to extract “time to first response” remaining from fields.sla (JSM)
 function extractFirstResponseSlaRemainingHours(fields) {
   const sla = fields?.sla;
   if (!sla) return null;
 
   const candidates = [];
-
   if (Array.isArray(sla)) {
     candidates.push(...sla);
   } else if (typeof sla === 'object') {
-    for (const key of Object.keys(sla)) {
-      candidates.push(sla[key]);
-    }
+    for (const key of Object.keys(sla)) candidates.push(sla[key]);
   }
 
   for (const entry of candidates) {
@@ -113,10 +105,8 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
       const isUnassigned = !i.fields?.assignee;
       const assigneeName = i.fields?.assignee?.displayName || null;
 
-      // SLA remaining hours (best-effort) — define it BEFORE we use it
       const firstResponseRemainingHours = extractFirstResponseSlaRemainingHours(i.fields);
 
-      // Base risk
       let risk = 'NORMAL';
 
       if (isBlocked) {
@@ -130,12 +120,10 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
           risk = 'MEDIUM';
         }
 
-        // Unassigned escalation
         if (isUnassigned && risk === 'MEDIUM') {
           risk = 'HIGH';
         }
 
-        // SLA escalation
         if (firstResponseRemainingHours !== null) {
           if (firstResponseRemainingHours <= SLA_HIGH_HOURS) {
             risk = 'HIGH';
@@ -145,9 +133,7 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
         }
       }
 
-      // Risk reasons (explainability) — build AFTER risk inputs are known
       const reasons = [];
-
       if (status === BLOCKED_STATUS_NAME) reasons.push('Waiting for support');
       if (isUnassigned) reasons.push('Unassigned');
       if (isDemoHigh) reasons.push('Demo override');
@@ -160,12 +146,6 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
       if (firstResponseRemainingHours !== null) {
         if (firstResponseRemainingHours <= SLA_HIGH_HOURS) reasons.push(`SLA ≤ ${SLA_HIGH_HOURS}h`);
         else if (firstResponseRemainingHours <= SLA_MEDIUM_HOURS) reasons.push(`SLA ≤ ${SLA_MEDIUM_HOURS}h`);
-      }
-
-      // If NORMAL and no reasons, keep UI clean
-      if (risk === 'NORMAL') {
-        // You can choose to keep reasons empty for NORMAL items
-        // (Judges like signal > noise)
       }
 
       return {
@@ -192,6 +172,33 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
     });
 
   return { issues, projectKey };
+});
+
+// ✅ Option B1: Assign to me (pit-crew action)
+resolver.define('assignToMe', async ({ payload, context }) => {
+  const issueKey = payload?.issueKey;
+  if (!issueKey) return { ok: false, error: 'Missing issueKey' };
+
+  // Forge gives us the current user's Atlassian accountId in context
+  const accountId = context?.accountId;
+  if (!accountId) return { ok: false, error: 'No accountId found in context' };
+
+  // Update assignee via Jira REST API v3
+  const res = await api.asUser().requestJira(
+    route`/rest/api/3/issue/${issueKey}/assignee`,
+    {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId }),
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    return { ok: false, error: `Assign failed: ${res.status} ${text}` };
+  }
+
+  return { ok: true };
 });
 
 export const handler = resolver.getDefinitions();

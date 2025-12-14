@@ -63,6 +63,22 @@ const App = () => {
     }
   };
 
+  // ✅ NEW: Assign to me
+  const assignToMe = async (issueKey) => {
+    setState((s) => ({ ...s, toast: `Assigning ${issueKey} to you...` }));
+    try {
+      const res = await invoke('assignToMe', { issueKey });
+      if (res?.ok) {
+        setState((s) => ({ ...s, toast: `✅ Assigned ${issueKey} to you` }));
+        await loadIssues();
+      } else {
+        setState((s) => ({ ...s, toast: `❌ Assign failed: ${res?.error || 'unknown error'}` }));
+      }
+    } catch (e) {
+      setState((s) => ({ ...s, toast: `❌ Assign failed: ${String(e)}` }));
+    }
+  };
+
   if (state.loading) return <Text>Loading Pit Wall…</Text>;
   if (state.error) return <Text>Error: {state.error}</Text>;
 
@@ -99,14 +115,21 @@ const App = () => {
                 : ''}
             </Text>
 
-            {/* NEW: Reasons line */}
             {i.reasons?.length ? (
               <Text>
                 <Strong>Reason:</Strong> {i.reasons.join(' • ')}
               </Text>
             ) : null}
 
-            <Button onClick={() => requestUpdate(i.key)}>Request update</Button>
+            {/* Actions */}
+            <Stack space="space.100">
+              {/* Only show Assign button if unassigned */}
+              {!i.assigneeName ? (
+                <Button onClick={() => assignToMe(i.key)}>Assign to me</Button>
+              ) : null}
+
+              <Button onClick={() => requestUpdate(i.key)}>Request update</Button>
+            </Stack>
           </Stack>
         ))
       )}
