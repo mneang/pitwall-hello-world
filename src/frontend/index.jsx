@@ -2,6 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { invoke } from '@forge/bridge';
 import ForgeReconciler, { Text, Strong, Stack, Lozenge, Button } from '@forge/react';
 
+function cleanSummary(summary) {
+  if (!summary) return '';
+  return summary.replace('[DEMO-HIGH]', '').trim();
+}
+
 function formatStale(staleHours) {
   if (staleHours === null || staleHours === undefined) return 'Unknown';
   if (staleHours < 24) return `${Math.round(staleHours)}h`;
@@ -82,13 +87,13 @@ const App = () => {
         state.issues.map((i) => (
           <Stack key={i.key} space="space.100">
             <Text>
-              <Strong>{i.key}</Strong> — {i.summary}
+            <Strong>{i.key}</Strong> — {cleanSummary(i.summary)}
             </Text>
 
             <Text>
               {riskLozenge(i.risk)}{' '}
               <Lozenge>{i.status}</Lozenge>{' '}
-              Updated: {new Date(i.updated).toLocaleString()} | Stale: {formatStale(i.staleHours)}
+              Updated: {new Date(i.updated).toLocaleString()} | Stale: {formatStale(i.staleHours)} | Owner: {i.assigneeName || 'Unassigned'} {i.firstResponseRemainingHours !== null ? `| SLA (1st response): ${Math.round(i.firstResponseRemainingHours * 10) / 10}h` : ''}
             </Text>
 
             <Button onClick={() => requestUpdate(i.key)}>Request update</Button>
