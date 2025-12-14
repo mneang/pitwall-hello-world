@@ -1,17 +1,101 @@
 import React, { useEffect, useState } from 'react';
-import ForgeReconciler, { Text } from '@forge/react';
 import { invoke } from '@forge/bridge';
+import ForgeReconciler, { Text, Strong, Stack, Lozenge, Button } from '@forge/react';
+
+function formatStale(staleHours) {
+  if (staleHours === null || staleHours === undefined) return 'Unknown';
+  if (staleHours < 24) return `${Math.round(staleHours)}h`;
+  const days = staleHours / 24;
+  return `${days.toFixed(1)}d`;
+}
 
 const App = () => {
-  const [data, setData] = useState(null);
+  const [state, setState] = useState({
+    loading: true,
+    projectKey: null,
+    issues: [],
+    error: null,
+    toast: null,
+  });
+
+  const loadIssues = async () => {
+    try {
+      const result = await invoke('getAtRiskIssues', {});
+      setState((s) => ({
+        ...s,
+        loading: false,
+        projectKey: result.projectKey || null,
+        issues: result.issues || [],
+        error: result.error || null,
+      }));
+    } catch (e) {
+      setState((s) => ({
+        ...s,
+        loading: false,
+        issues: [],
+        error: String(e),
+      }));
+    }
+  };
+
   useEffect(() => {
-    invoke('getText', { example: 'my-invoke-variable' }).then(setData);
+    loadIssues();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const requestUpdate = async (issueKey) => {
+    setState((s) => ({ ...s, toast: `Sending request for ${issueKey}...` }));
+    try {
+      const res = await invoke('requestUpdate', { issueKey });
+      if (res?.ok) {
+        setState((s) => ({ ...s, toast: `✅ Comment added to ${issueKey}` }));
+        await loadIssues(); // refresh ordering/timestamps
+      } else {
+        setState((s) => ({ ...s, toast: `❌ Failed: ${res?.error || 'unknown error'}` }));
+      }
+    } catch (e) {
+      setState((s) => ({ ...s, toast: `❌ Failed: ${String(e)}` }));
+    }
+  };
+
+  if (state.loading) return <Text>Loading Pit Wall…</Text>;
+  if (state.error) return <Text>Error: {state.error}</Text>;
+
+  const riskLozenge = (risk) => {
+    if (risk === 'HIGH') return <Lozenge appearance="removed">HIGH RISK</Lozenge>;
+    if (risk === 'MEDIUM') return <Lozenge appearance="inprogress">MEDIUM RISK</Lozenge>;
+    return <Lozenge appearance="success">Normal</Lozenge>;
+  };
+
   return (
-    <>
-      <Text>Hello world!</Text>
-      <Text>{data ? data : 'Loading...'}</Text>
-    </>
+    <Stack space="space.200">
+      <Text>
+        <Strong>Pit Wall — At-Risk Work (Top 10)</Strong>
+      </Text>
+
+      {state.projectKey && <Text>Project: {state.projectKey}</Text>}
+      {state.toast && <Text>{state.toast}</Text>}
+
+      {!state.issues.length ? (
+        <Text>No open issues found. Create a few issues in this project to demo.</Text>
+      ) : (
+        state.issues.map((i) => (
+          <Stack key={i.key} space="space.100">
+            <Text>
+              <Strong>{i.key}</Strong> — {i.summary}
+            </Text>
+
+            <Text>
+              {riskLozenge(i.risk)}{' '}
+              <Lozenge>{i.status}</Lozenge>{' '}
+              Updated: {new Date(i.updated).toLocaleString()} | Stale: {formatStale(i.staleHours)}
+            </Text>
+
+            <Button onClick={() => requestUpdate(i.key)}>Request update</Button>
+          </Stack>
+        ))
+      )}
+    </Stack>
   );
 };
 
