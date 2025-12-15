@@ -21,7 +21,7 @@ const SLA_MEDIUM_HOURS = 8; // <= 8h remaining => at least MEDIUM
 const SKIP_REQUEST_UPDATE_WITHIN_HOURS = 6;
 const SKIP_PLAYBOOK_NOTE_WITHIN_HOURS = 12;
 
-// Labels / markers (these are your “audit trail”)
+// Labels / markers (audit trail)
 const PITWALL_MARK = '[PITWALL]';
 const LABEL_ESCALATED = 'pitwall-escalated';
 
@@ -76,7 +76,6 @@ function adfToText(adf) {
 }
 
 // Parse Jira Service Management SLA remaining time (best-effort)
-// Handles patterns like: "2h 30m", "45m", "1d 3h", and "Breached"
 function parseSlaRemainingToHours(text) {
   if (!text) return null;
 
@@ -136,14 +135,38 @@ function rankRisk(risk) {
   return 2;
 }
 
-// Defensive wrapper for Jira API
+/**
+ * =========================
+ * Jira API wrapper (HARDENED)
+ * =========================
+ *
+ * Critical fix: Many Jira endpoints return 204 No Content.
+ * If you call res.json() on those, you get "Unexpected end of JSON input".
+ */
 async function jiraRequest(path, options = {}) {
   const res = await api.asUser().requestJira(path, options);
+
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Jira API failed: ${res.status} ${text}`);
   }
-  return res.json();
+
+  // 204 = no content
+  if (res.status === 204) return null;
+
+  // Some endpoints return empty body even with 200/201 (rare). Handle defensively.
+  const contentType = res.headers?.get?.('content-type') || '';
+  const isJson = contentType.includes('application/json');
+
+  if (isJson) {
+    const txt = await res.text();
+    if (!txt) return null;
+    return JSON.parse(txt);
+  }
+
+  // If not JSON, return text (or null if empty)
+  const txt = await res.text();
+  return txt || null;
 }
 
 async function getIssue(issueKey) {
@@ -172,18 +195,18 @@ function hasRecentMarkedComment(comments, marker, withinHours) {
 
 async function addComment(issueKey, lines) {
   const body = adfDocFromLines(lines);
-  return jiraRequest(route`/rest/api/3/issue/${issueKey}/comment`, {
+  await jiraRequest(route`/rest/api/3/issue/${issueKey}/comment`, {
     method: 'POST',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ body }),
   });
+  return { ok: true };
 }
 
 async function assignToMe(issueKey, accountId) {
-  // Jira expects { accountId } for assignee
   await jiraRequest(route`/rest/api/3/issue/${issueKey}/assignee`, {
     method: 'PUT',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ accountId }),
   });
   return { ok: true };
@@ -197,11 +220,11 @@ async function escalateByLabel(issueKey) {
   const next = Array.from(new Set([...labels, LABEL_ESCALATED]));
   await jiraRequest(route`/rest/api/3/issue/${issueKey}`, {
     method: 'PUT',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: { labels: next } }),
   });
 
-  // Audit comment (optional but nice for judges)
+  // Audit comment
   await addComment(issueKey, [
     `${MARK_ESCALATION}`,
     `Escalation applied: label "${LABEL_ESCALATED}"`,
@@ -237,7 +260,7 @@ function computeRiskAndReasons(fields) {
 
   const firstResponseRemainingHours = extractFirstResponseSlaRemainingHours(fields);
 
-  // Reasons first (explainability)
+  // Explainability: reasons
   const reasons = [];
   if (isDemoHigh) reasons.push('Demo override');
   if (isBlocked) reasons.push('Waiting for support');
@@ -270,18 +293,27 @@ function computeRiskAndReasons(fields) {
     // Owner escalation: unassigned + blocked => bump to HIGH
     if (isUnassigned && risk === 'MEDIUM') risk = 'HIGH';
 
-    // SLA escalation: very close => HIGH, close => at least MEDIUM
+    // SLA escalation
     if (firstResponseRemainingHours !== null) {
       if (firstResponseRemainingHours <= SLA_HIGH_HOURS) risk = 'HIGH';
       else if (firstResponseRemainingHours <= SLA_MEDIUM_HOURS && risk === 'NORMAL') risk = 'MEDIUM';
     }
   }
 
-  // Recommended next actions (for “product” feel)
+  // “Recommended” action chain
   const recommended = [];
   if (isUnassigned) recommended.push('Assign to me');
   if (isBlocked) recommended.push('Request update');
+  if (isBlocked) recommended.push('Post playbook note');
+  if (isBlocked) recommended.push('Generate customer update');
   if (firstResponseRemainingHours !== null && firstResponseRemainingHours <= SLA_HIGH_HOURS) recommended.push('Escalate');
+
+  // Guidance strings (for UI)
+  const next = recommended[0] || '—';
+  const pitWallCall = isBlocked
+    ? 'Post playbook note — Blocked — document the plan and next steps.'
+    : '—';
+  const recommendedPath = recommended.length ? recommended.join(' → ') : '—';
 
   return {
     status,
@@ -292,6 +324,9 @@ function computeRiskAndReasons(fields) {
     risk,
     reasons,
     recommended,
+    next,
+    pitWallCall,
+    recommendedPath,
   };
 }
 
@@ -310,7 +345,7 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
     route`/rest/api/3/search/jql?jql=${jql}&maxResults=10&fields=summary,status,updated,assignee,labels,sla`
   );
 
-  const rawIssues = data.issues || [];
+  const rawIssues = data?.issues || [];
 
   const issues = rawIssues
     .map((i) => {
@@ -328,6 +363,9 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
         risk: computed.risk,
         reasons: computed.reasons,
         recommended: computed.recommended,
+        next: computed.next,
+        pitWallCall: computed.pitWallCall,
+        recommendedPath: computed.recommendedPath,
       };
     })
     .sort((a, b) => {
@@ -340,7 +378,6 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
       return ta - tb;
     });
 
-  // Scoreboard stats
   const stats = {
     high: issues.filter((x) => x.risk === 'HIGH').length,
     medium: issues.filter((x) => x.risk === 'MEDIUM').length,
@@ -354,7 +391,7 @@ resolver.define('getAtRiskIssues', async ({ context }) => {
 
 /**
  * =========================
- * Individual actions (keep stable)
+ * Individual actions (stable)
  * =========================
  */
 resolver.define('requestUpdate', async ({ payload }) => {
@@ -423,7 +460,6 @@ resolver.define('runPlaybook', async ({ payload, context }) => {
   if (!issueKey) return { ok: false, error: 'Missing issueKey' };
   if (!accountId) return { ok: false, error: 'No accountId in context' };
 
-  // Fetch issue + comments for skip logic
   const issue = await getIssue(issueKey);
   const comments = await getComments(issueKey);
 
@@ -466,7 +502,7 @@ resolver.define('runPlaybook', async ({ payload, context }) => {
     steps.push({ key: 'note', label: 'Post playbook note', status: 'failed', message: String(e) });
   }
 
-  // Step 3: Request update (skip if posted recently)
+  // Step 3: Request update (skip if requested recently)
   try {
     const skip = hasRecentMarkedComment(comments, MARK_REQUEST_UPDATE, SKIP_REQUEST_UPDATE_WITHIN_HOURS);
     if (skip) {
@@ -490,7 +526,7 @@ resolver.define('runPlaybook', async ({ payload, context }) => {
   const draft = buildCustomerDraft(issueKey, fields?.summary || issueKey, computed.status);
   steps.push({ key: 'draft', label: 'Generate customer update', status: 'done', message: `Draft ready for ${issueKey}` });
 
-  // Step 5: Escalate (only if risk is HIGH and SLA is hot OR unassigned OR very stale)
+  // Step 5: Escalate (policy-based)
   try {
     const shouldEscalate =
       computed.risk === 'HIGH' &&
@@ -513,7 +549,125 @@ resolver.define('runPlaybook', async ({ payload, context }) => {
     steps.push({ key: 'esc', label: 'Escalate', status: 'failed', message: String(e) });
   }
 
-  // Outcome summary (judge candy 🍬)
+  const outcome = {
+    owner: fields?.assignee?.displayName || 'Unassigned',
+    risk: computed.risk,
+    reasons: computed.reasons,
+    recommended: computed.recommended,
+    nextUpdate: 'Next business day (or sooner if progress)',
+    escalationLabel: LABEL_ESCALATED,
+  };
+
+  return { ok: true, issueKey, steps, draft, outcome };
+});
+
+/**
+ * =========================
+ * New: runRecommended (only runs what the UI says is “recommended”)
+ * =========================
+ */
+resolver.define('runRecommended', async ({ payload, context }) => {
+  const issueKey = payload?.issueKey;
+  const accountId = context?.accountId;
+
+  if (!issueKey) return { ok: false, error: 'Missing issueKey' };
+  if (!accountId) return { ok: false, error: 'No accountId in context' };
+
+  const issue = await getIssue(issueKey);
+  const comments = await getComments(issueKey);
+
+  const fields = issue?.fields || {};
+  const computed = computeRiskAndReasons(fields);
+
+  const steps = [];
+  const rec = computed.recommended || [];
+
+  const wants = (label) => rec.includes(label);
+
+  // Assign
+  if (wants('Assign to me')) {
+    if (!fields?.assignee) {
+      try {
+        await assignToMe(issueKey, accountId);
+        steps.push({ key: 'assign', label: 'Assign to me', status: 'done', message: `Assigned ${issueKey}` });
+      } catch (e) {
+        steps.push({ key: 'assign', label: 'Assign to me', status: 'failed', message: String(e) });
+      }
+    } else {
+      steps.push({ key: 'assign', label: 'Assign to me', status: 'skipped', message: 'Skipped — already assigned' });
+    }
+  }
+
+  // Request update (skip if recent)
+  if (wants('Request update')) {
+    try {
+      const skip = hasRecentMarkedComment(comments, MARK_REQUEST_UPDATE, SKIP_REQUEST_UPDATE_WITHIN_HOURS);
+      if (skip) {
+        steps.push({ key: 'req', label: 'Request update', status: 'skipped', message: `Skipped — requested within ${SKIP_REQUEST_UPDATE_WITHIN_HOURS}h` });
+      } else {
+        await addComment(issueKey, [
+          `${MARK_REQUEST_UPDATE}`,
+          'Pit stop check: please post a quick update.',
+          '',
+          '• What’s blocking?',
+          '• ETA for next step?',
+          '• Do you need help?',
+        ]);
+        steps.push({ key: 'req', label: 'Request update', status: 'done', message: `Request update posted for ${issueKey}` });
+      }
+    } catch (e) {
+      steps.push({ key: 'req', label: 'Request update', status: 'failed', message: String(e) });
+    }
+  }
+
+  // Playbook note (skip if recent)
+  if (wants('Post playbook note')) {
+    try {
+      const skip = hasRecentMarkedComment(comments, MARK_PLAYBOOK_NOTE, SKIP_PLAYBOOK_NOTE_WITHIN_HOURS);
+      if (skip) {
+        steps.push({ key: 'note', label: 'Post playbook note', status: 'skipped', message: `Skipped — posted within ${SKIP_PLAYBOOK_NOTE_WITHIN_HOURS}h` });
+      } else {
+        await addComment(issueKey, [
+          `${MARK_PLAYBOOK_NOTE}`,
+          `Reasons: ${computed.reasons.join(' • ') || 'n/a'}`,
+          '',
+          'Plan:',
+          '1) Assign owner (if missing)',
+          '2) Request update on blockers',
+          '3) Generate customer update draft',
+          '4) Escalate if SLA hot / risk HIGH persists',
+        ]);
+        steps.push({ key: 'note', label: 'Post playbook note', status: 'done', message: `Playbook note posted for ${issueKey}` });
+      }
+    } catch (e) {
+      steps.push({ key: 'note', label: 'Post playbook note', status: 'failed', message: String(e) });
+    }
+  }
+
+  // Draft (always produce if recommended)
+  const draft = wants('Generate customer update')
+    ? buildCustomerDraft(issueKey, fields?.summary || issueKey, computed.status)
+    : '';
+
+  if (wants('Generate customer update')) {
+    steps.push({ key: 'draft', label: 'Generate customer update', status: 'done', message: `Draft ready for ${issueKey}` });
+  }
+
+  // Escalate (only if recommended & policy is actually met)
+  if (wants('Escalate')) {
+    try {
+      const labels = fields?.labels || [];
+      if (labels.includes(LABEL_ESCALATED)) {
+        steps.push({ key: 'esc', label: 'Escalate', status: 'skipped', message: 'Skipped — already escalated' });
+      } else {
+        await escalateByLabel(issueKey);
+        steps.push({ key: 'esc', label: 'Escalate', status: 'done', message: `Escalated ${issueKey}` });
+      }
+    } catch (e) {
+      steps.push({ key: 'esc', label: 'Escalate', status: 'failed', message: String(e) });
+    }
+  }
+
   const outcome = {
     owner: fields?.assignee?.displayName || 'Unassigned',
     risk: computed.risk,

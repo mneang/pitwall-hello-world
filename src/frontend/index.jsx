@@ -40,6 +40,9 @@ const App = () => {
     logs: [],              // array of strings
     drafts: {},            // { [issueKey]: string }
     lastRun: {},           // { [issueKey]: string }
+
+    // UI toggles
+    showLog: true,
   });
 
   const loadIssues = async () => {
@@ -74,17 +77,26 @@ const App = () => {
   };
 
   const pushLog = (line) => {
-    setState((s) => ({ ...s, logs: [line, ...s.logs].slice(0, 12) })); // keep last 12
+    setState((s) => ({ ...s, logs: [line, ...s.logs].slice(0, 25) })); // keep last 25
   };
+
+  const clearLog = () => setState((s) => ({ ...s, logs: [] }));
 
   const doAction = async (issueKey, label, fn) => {
     setBusy(issueKey, true);
     setState((s) => ({ ...s, toast: `${label} running for ${issueKey}…` }));
+
     try {
       const res = await fn();
+
       if (res?.ok) {
-        setState((s) => ({ ...s, toast: `✅ ${label} complete for ${issueKey}` }));
-        pushLog(`✅ ${label} — ${label} complete for ${issueKey}`);
+        if (res?.skipped) {
+          setState((s) => ({ ...s, toast: `⏭️ ${label} skipped for ${issueKey}` }));
+          pushLog(`⏭️ ${label} — skipped for ${issueKey}`);
+        } else {
+          setState((s) => ({ ...s, toast: `✅ ${label} complete for ${issueKey}` }));
+          pushLog(`✅ ${label} — ${label} complete for ${issueKey}`);
+        }
         await loadIssues();
       } else {
         setState((s) => ({ ...s, toast: `❌ ${label} failed: ${res?.error || 'unknown error'}` }));
@@ -128,47 +140,47 @@ const App = () => {
     pushLog(`✅ Generate customer update — Customer update draft ready for ${issue.key}`);
   };
 
-  const runPlaybook = async (issue) => {
+  const runMacro = async (issue, macroName, resolverName) => {
     const issueKey = issue.key;
 
     setBusy(issueKey, true);
-    setState((s) => ({ ...s, toast: `Running playbook for ${issueKey}…` }));
+    setState((s) => ({ ...s, toast: `Running ${macroName} for ${issueKey}…` }));
 
     try {
-      const res = await invoke('runPlaybook', { issueKey });
+      const res = await invoke(resolverName, { issueKey });
 
       if (!res?.ok) {
-        setState((s) => ({ ...s, toast: `❌ Playbook failed: ${res?.error || 'unknown error'}` }));
-        pushLog(`❌ Playbook — failed for ${issueKey}: ${res?.error || 'unknown error'}`);
+        setState((s) => ({ ...s, toast: `❌ ${macroName} failed: ${res?.error || 'unknown error'}` }));
+        pushLog(`❌ ${macroName} — failed for ${issueKey}: ${res?.error || 'unknown error'}`);
         return;
       }
 
-      // Step logs (done/skipped/failed)
       const steps = res.steps || [];
       for (const step of steps) {
         pushLog(`${stepPrefix(step.status)} ${step.label} — ${step.message}`);
       }
 
-      // Draft
       if (typeof res.draft === 'string' && res.draft.trim()) {
         setState((s) => ({ ...s, drafts: { ...s.drafts, [issueKey]: res.draft } }));
       }
 
-      // Timestamp
       setState((s) => ({
         ...s,
-        toast: `✅ Playbook complete for ${issueKey}`,
+        toast: `✅ ${macroName} complete for ${issueKey}`,
         lastRun: { ...s.lastRun, [issueKey]: new Date().toLocaleString() },
       }));
 
       await loadIssues();
     } catch (e) {
-      setState((s) => ({ ...s, toast: `❌ Playbook failed: ${String(e)}` }));
-      pushLog(`❌ Playbook — failed for ${issueKey}: ${String(e)}`);
+      setState((s) => ({ ...s, toast: `❌ ${macroName} failed: ${String(e)}` }));
+      pushLog(`❌ ${macroName} — failed for ${issueKey}: ${String(e)}`);
     } finally {
       setBusy(issueKey, false);
     }
   };
+
+  const runPlaybook = (issue) => runMacro(issue, 'Run playbook', 'runPlaybook');
+  const runRecommended = (issue) => runMacro(issue, 'Run recommended', 'runRecommended');
 
   const copyToClipboard = async (text) => {
     try {
@@ -187,8 +199,8 @@ const App = () => {
         <Lozenge appearance="removed">HIGH: {stats.high}</Lozenge>{' '}
         <Lozenge appearance="inprogress">MEDIUM: {stats.medium}</Lozenge>{' '}
         <Lozenge appearance="success">NORMAL: {stats.normal}</Lozenge>{' '}
-        <Lozenge>Unassigned HIGH: {stats.unassignedHigh}</Lozenge>{' '}
-        <Lozenge>SLA ≤ 2h: {stats.slaHot}</Lozenge>
+        <Lozenge>UNASSIGNED HIGH: {stats.unassignedHigh}</Lozenge>{' '}
+        <Lozenge>SLA ≤ 2H: {stats.slaHot}</Lozenge>
       </Text>
     );
   }, [state.stats]);
@@ -206,7 +218,14 @@ const App = () => {
       {scoreboard}
       {state.toast && <Text>{state.toast}</Text>}
 
-      {!!state.logs.length && (
+      <Text>
+        <Button onClick={() => setState((s) => ({ ...s, showLog: !s.showLog }))}>
+          {state.showLog ? 'Hide activity log' : 'Show activity log'}
+        </Button>{' '}
+        <Button onClick={clearLog}>Clear log</Button>
+      </Text>
+
+      {state.showLog && !!state.logs.length && (
         <Stack space="space.050">
           {state.logs.map((l, idx) => (
             <Text key={idx}>{l}</Text>
@@ -241,20 +260,27 @@ const App = () => {
                 <Strong>Reason:</Strong> {(i.reasons || []).join(' • ') || '—'}
               </Text>
 
-              {(i.recommended || []).length ? (
-                <Text>
-                  <Strong>Next:</Strong> {(i.recommended || []).join(' → ')}
-                </Text>
-              ) : null}
+              <Text>
+                <Strong>Next:</Strong> {i.next || '—'}
+              </Text>
 
-              {/* Buttons inline (safe layout) */}
+              <Text>
+                <Strong>Pit Wall call:</Strong> {i.pitWallCall || '—'}
+              </Text>
+
+              <Text>
+                <Strong>Recommended:</Strong> {i.recommendedPath || (i.recommended || []).join(' → ') || '—'}
+              </Text>
+
+              {/* Buttons inline */}
               <Text>
                 <Button isDisabled={isBusy} onClick={() => assignToMe(i.key)}>Assign to me</Button>{' '}
                 <Button isDisabled={isBusy} onClick={() => requestUpdate(i.key)}>Request update</Button>{' '}
                 <Button isDisabled={isBusy} onClick={() => postPlaybookNote(i.key, i.reasons)}>Post playbook note</Button>{' '}
                 <Button isDisabled={isBusy} onClick={() => generateDraftLocal(i)}>Generate customer update</Button>{' '}
                 <Button isDisabled={isBusy} appearance="danger" onClick={() => escalate(i.key)}>Escalate</Button>{' '}
-                <Button isDisabled={isBusy} appearance="primary" onClick={() => runPlaybook(i)}>Run playbook</Button>
+                <Button isDisabled={isBusy} appearance="primary" onClick={() => runPlaybook(i)}>Run playbook</Button>{' '}
+                <Button isDisabled={isBusy} appearance="primary" onClick={() => runRecommended(i)}>Run recommended</Button>
               </Text>
 
               {last ? <Text>Last run: {last}</Text> : null}
@@ -262,7 +288,9 @@ const App = () => {
               {draft ? (
                 <Stack space="space.050">
                   <Text><Strong>Customer update draft</Strong></Text>
-                  <Text>{draft}</Text>
+                  {draft.split('\n').map((line, idx) => (
+                    <Text key={idx}>{line}</Text>
+                  ))}
                   <Button onClick={() => copyToClipboard(draft)}>Copy draft</Button>
                 </Stack>
               ) : null}
